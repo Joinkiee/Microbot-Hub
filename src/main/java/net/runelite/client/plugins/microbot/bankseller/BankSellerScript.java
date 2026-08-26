@@ -61,7 +61,7 @@ public class BankSellerScript extends Script {
     /** After the 1gp re-list the plugin stops anyway when nothing sold within this window. */
     private static final int LEFTOVER_GIVE_UP_MS = 60_000;
 
-    /** A liquidation pass that aborts nothing gets this many retries before giving up. */
+    /** A failed liquidation pass gets this many safe retries before an explicit stop. */
     private static final int MAX_LIQUIDATION_ATTEMPTS = 3;
 
     /**
@@ -117,6 +117,9 @@ public class BankSellerScript extends Script {
 
     private BankSellerPlugin plugin;
 
+    /** True after a logged-in client snapshot established the foreign-slot boundary. */
+    private boolean occupiedSlotsSnapshotted;
+
     /** Set when the current item's setup shows the red trade-restriction notice. */
     private String tradeRestrictionText;
 
@@ -132,6 +135,9 @@ public class BankSellerScript extends Script {
 
     /** True while the liquidation pass re-lists items - restricts the sell pass to owned items. */
     private boolean liquidatingOwned;
+
+    /** True while every usable GE slot is occupied and none may be collected safely. */
+    private boolean waitingForOfferSlot;
 
     /** Last time the drained watch saw an offer sell or finish. */
     private long lastOfferProgressAt;
@@ -154,31 +160,43 @@ public class BankSellerScript extends Script {
         transientFailureCounts.clear();
         ownedOfferItemIds.clear();
         foreignSlotOrdinals.clear();
+        occupiedSlotsSnapshotted = false;
         tradeRestrictionText = null;
         bankDrained = false;
         forcedSellPrice = null;
         liquidatingOwned = false;
+        waitingForOfferSlot = false;
         lastOfferProgressAt = System.currentTimeMillis();
         leftoverLiquidated = false;
         liquidationAttempts = 0;
         sessionOffersPlaced = 0;
         sessionStacksRefused = 0;
-        snapshotOccupiedSlots();
         mainScheduledFuture = scheduledExecutorService.scheduleWithFixedDelay(() -> {
             try {
                 if (!Microbot.isLoggedIn()) return;
                 if (!super.run()) return;
-
-                collectSoldOffers();
+                if (!occupiedSlotsSnapshotted) {
+                    if (!snapshotOccupiedSlots()) {
+                        return;
+                    }
+                    occupiedSlotsSnapshotted = true;
+                }
 
                 if (bankDrained) {
                     // Bank and inventory are both drained of sellables - just watch
                     // the remaining offers. No bank/GE opening, no mouse movement.
-                    if (Rs2GrandExchange.hasSoldOffer()) {
-                        collectPendingOffers();
-                        lastOfferProgressAt = System.currentTimeMillis();
+                    if (hasOwnedSoldOffer()) {
+                        boolean allOwnedSlotsEmpty = collectPendingOffers();
+                        if (!hasOwnedSoldOffer()) {
+                            lastOfferProgressAt = System.currentTimeMillis();
+                        }
+                        if (allOwnedSlotsEmpty) {
+                            announce(finalVerdictMessage());
+                            Microbot.stopPlugin(plugin);
+                            return;
+                        }
                     }
-                    if (Rs2GrandExchange.isAllSlotsEmpty()) {
+                    if (!hasOwnedActiveOffers()) {
                         announce(finalVerdictMessage());
                         Microbot.stopPlugin(plugin);
                         return;
@@ -188,13 +206,24 @@ public class BankSellerScript extends Script {
                         // An offer that will not fill at the instant-sell price gets
                         // one final attempt at 1gp so the run can actually finish
                         boolean done = liquidateLeftoverOffers();
-                        liquidationAttempts = done ? 0 : liquidationAttempts + 1;
-                        leftoverLiquidated = done || liquidationAttempts >= MAX_LIQUIDATION_ATTEMPTS;
-                        // On failure retry in ~15s instead of waiting the full timeout again
-                        lastOfferProgressAt = System.currentTimeMillis()
-                                - (leftoverLiquidated ? 0 : LEFTOVER_OFFER_TIMEOUT_MS - 15_000);
+                        if (done) {
+                            liquidationAttempts = 0;
+                            leftoverLiquidated = true;
+                            lastOfferProgressAt = System.currentTimeMillis();
+                        } else {
+                            liquidationAttempts++;
+                            if (liquidationAttempts >= MAX_LIQUIDATION_ATTEMPTS) {
+                                announce("ERROR: unable to safely liquidate every Bank Seller offer; "
+                                        + "leaving the remaining offers/items untouched. Stopping.");
+                                Microbot.stopPlugin(plugin);
+                                return;
+                            }
+                            // Retry in ~15s instead of waiting the full timeout again.
+                            lastOfferProgressAt = System.currentTimeMillis()
+                                    - LEFTOVER_OFFER_TIMEOUT_MS + 15_000;
+                        }
                     } else if (leftoverLiquidated && watchIdleMs > LEFTOVER_GIVE_UP_MS) {
-                        if (findOwnedActiveSlots().isEmpty()) {
+                        if (!hasOwnedActiveOffers()) {
                             // Only foreign offers are left open - they are not ours to collect
                             announce("Only pre-existing Grand Exchange offers remain - leaving them untouched. Stopping");
                         } else {
@@ -204,6 +233,26 @@ public class BankSellerScript extends Script {
                         Microbot.stopPlugin(plugin);
                     }
                     return;
+                }
+
+                if (waitingForOfferSlot
+                        && Rs2GrandExchange.getAvailableSlotsCount() == 0
+                        && !hasOwnedSoldOffer()) {
+                    // Poll client-side until a safe slot opens; do not repeatedly
+                    // bank, withdraw and reopen the GE while all slots are foreign.
+                    return;
+                }
+                collectSoldOffers();
+
+                if (waitingForOfferSlot) {
+                    if (Rs2GrandExchange.getAvailableSlotsCount() == 0) {
+                        return;
+                    }
+                    waitingForOfferSlot = false;
+                    if (hasSellableInventoryItems()) {
+                        sellInventory();
+                        return;
+                    }
                 }
 
                 // Always bank first: deposit everything, then pull out every sellable item as notes
@@ -234,10 +283,10 @@ public class BankSellerScript extends Script {
      * The offers in them belong to the user (or another plugin) and the
      * endgame liquidation must never abort, collect or re-list them.
      */
-    private void snapshotOccupiedSlots() {
-        clientValue(() -> {
+    private boolean snapshotOccupiedSlots() {
+        return clientValue(() -> {
             GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
-            if (offers == null) {
+            if (offers == null || offers.length == 0) {
                 return false;
             }
             for (int i = 0; i < offers.length; i++) {
@@ -272,7 +321,7 @@ public class BankSellerScript extends Script {
     }
 
     private void collectSoldOffers() {
-        if (!Rs2GrandExchange.hasSoldOffer()) {
+        if (!hasOwnedSoldOffer()) {
             return;
         }
         if (!Rs2GrandExchange.openExchange()) {
@@ -281,8 +330,8 @@ public class BankSellerScript extends Script {
         if (!sleepUntil(Rs2GrandExchange::isOpen, EXCHANGE_OPEN_TIMEOUT_MS)) {
             return;
         }
-        Rs2GrandExchange.collectAllToBank();
-        sleepUntil(() -> !Rs2GrandExchange.hasSoldOffer());
+        collectOwnedSoldOffersToBank();
+        sleepUntil(() -> !hasOwnedSoldOffer(), SETUP_WAIT_TIMEOUT_MS);
         Rs2GrandExchange.closeExchange();
         sleepUntil(() -> !Rs2GrandExchange.isOpen());
     }
@@ -301,12 +350,12 @@ public class BankSellerScript extends Script {
         if (!sleepUntil(Rs2GrandExchange::isOpen, EXCHANGE_OPEN_TIMEOUT_MS)) {
             return false;
         }
-        Rs2GrandExchange.collectAllToBank();
-        sleepUntil(() -> !Rs2GrandExchange.hasSoldOffer());
-        boolean allSlotsEmpty = Rs2GrandExchange.isAllSlotsEmpty();
+        collectOwnedSoldOffersToBank();
+        sleepUntil(() -> !hasOwnedSoldOffer(), SETUP_WAIT_TIMEOUT_MS);
+        boolean allOwnedSlotsEmpty = !hasOwnedActiveOffers();
         Rs2GrandExchange.closeExchange();
         sleepUntil(() -> !Rs2GrandExchange.isOpen());
-        return allSlotsEmpty;
+        return allOwnedSlotsEmpty;
     }
 
     /**
@@ -314,23 +363,107 @@ public class BankSellerScript extends Script {
      * required, so foreign offers are never touched: the slot must not have
      * been occupied at startup, and the offer's item must be one this run
      * successfully listed.
+     *
+     * @return owned slots, or null when the client offer array could not be read
      */
     private List<GrandExchangeSlots> findOwnedActiveSlots() {
-        List<GrandExchangeSlots> owned = new ArrayList<>();
-        for (GrandExchangeSlots slot : Rs2GrandExchange.getActiveOfferSlots()) {
-            GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
-            if (details == null) {
-                continue;
+        return clientValue(() -> {
+            List<GrandExchangeSlots> owned = new ArrayList<>();
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            GrandExchangeSlots[] slots = GrandExchangeSlots.values();
+            if (offers == null || offers.length == 0) {
+                return null;
             }
-            if (foreignSlotOrdinals.contains(Rs2GrandExchange.getSlotIndex(slot))) {
-                continue;
+            int slotCount = Math.min(offers.length, slots.length);
+            for (int i = 0; i < slotCount; i++) {
+                if (isOwnedOffer(i, offers[i])) {
+                    owned.add(slots[i]);
+                }
             }
-            if (!ownedOfferItemIds.contains(canonicalTradeItemId(details.getItemId()))) {
-                continue;
+            return owned;
+        }, null);
+    }
+
+    /** True while at least one non-empty slot still belongs to this run. */
+    private boolean hasOwnedActiveOffers() {
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || offers.length == 0) {
+                return true;
             }
-            owned.add(slot);
+            for (int i = 0; i < offers.length; i++) {
+                if (isOwnedOffer(i, offers[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }, true);
+    }
+
+    /**
+     * Checks only this run's slots. A completed foreign offer must not wake the
+     * collector or reset the leftover-offer timer.
+     */
+    private boolean hasOwnedSoldOffer() {
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || offers.length == 0) {
+                return false;
+            }
+            for (int i = 0; i < offers.length; i++) {
+                GrandExchangeOffer offer = offers[i];
+                if (isOwnedOffer(i, offer) && offer.getState() == GrandExchangeOfferState.SOLD) {
+                    return true;
+                }
+            }
+            return false;
+        }, false);
+    }
+
+    private boolean isOwnedOffer(int slotOrdinal, GrandExchangeOffer offer) {
+        return offer != null
+                && offer.getItemId() > 0
+                && (offer.getState() == GrandExchangeOfferState.SELLING
+                    || offer.getState() == GrandExchangeOfferState.SOLD
+                    || offer.getState() == GrandExchangeOfferState.CANCELLED_SELL)
+                && !foreignSlotOrdinals.contains(slotOrdinal)
+                && ownedOfferItemIds.contains(canonicalTradeItemId(offer.getItemId()));
+    }
+
+    /**
+     * Collects completed sell offers one slot at a time. The global collect-all
+     * action is deliberately forbidden because it also clears pre-existing buy
+     * and sell offers owned by the player.
+     */
+    private boolean collectOwnedSoldOffersToBank() {
+        List<GrandExchangeSlots> ownedSlots = findOwnedActiveSlots();
+        if (ownedSlots == null) {
+            return false;
         }
-        return owned;
+        boolean foundSoldOffer = false;
+        for (GrandExchangeSlots slot : ownedSlots) {
+            GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
+            if (details == null || details.getState() != GrandExchangeOfferState.SOLD) {
+                continue;
+            }
+            foundSoldOffer = true;
+            int expectedItemId = details.getItemId();
+            if (ownedSlotState(slot, expectedItemId) != GrandExchangeOfferState.SOLD) {
+                return false;
+            }
+            if (!Rs2GrandExchange.collectOffer(slot, true)
+                    || !sleepUntil(() -> isOwnedSlotResolved(slot, expectedItemId), SETUP_WAIT_TIMEOUT_MS)) {
+                if (Rs2GrandExchange.isOfferScreenOpen()) {
+                    Rs2GrandExchange.backToOverview();
+                }
+                return false;
+            }
+            if (Rs2GrandExchange.isOfferScreenOpen()) {
+                Rs2GrandExchange.backToOverview();
+                sleep(300, 500);
+            }
+        }
+        return foundSoldOffer;
     }
 
     /**
@@ -338,11 +471,55 @@ public class BankSellerScript extends Script {
      * longer holds the expected item (filled and collected meanwhile).
      */
     private GrandExchangeOfferState ownedSlotState(GrandExchangeSlots slot, int expectedItemId) {
-        GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
-        if (details == null || details.getItemId() != expectedItemId) {
-            return null;
-        }
-        return details.getState();
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || slot.ordinal() >= offers.length) {
+                return null;
+            }
+            GrandExchangeOffer offer = offers[slot.ordinal()];
+            if (!isOwnedOffer(slot.ordinal(), offer)
+                    || !sameTradeItem(offer.getItemId(), expectedItemId)) {
+                return null;
+            }
+            return offer.getState();
+        }, null);
+    }
+
+    /**
+     * True only after a reliable client read proves that the expected owned
+     * offer no longer occupies this slot. Unknown reads fail closed.
+     */
+    private boolean isOwnedSlotResolved(GrandExchangeSlots slot, int expectedItemId) {
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || slot.ordinal() >= offers.length) {
+                return false;
+            }
+            GrandExchangeOffer offer = offers[slot.ordinal()];
+            return offer == null
+                    || offer.getState() == GrandExchangeOfferState.EMPTY
+                    || !isOwnedOffer(slot.ordinal(), offer)
+                    || !sameTradeItem(offer.getItemId(), expectedItemId);
+        }, false);
+    }
+
+    /** True after a reliable read proves the expected offer left the supplied state. */
+    private boolean hasOwnedSlotLeftState(GrandExchangeSlots slot, int expectedItemId,
+                                           GrandExchangeOfferState state) {
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || slot.ordinal() >= offers.length) {
+                return false;
+            }
+            GrandExchangeOffer offer = offers[slot.ordinal()];
+            if (offer == null
+                    || offer.getState() == GrandExchangeOfferState.EMPTY
+                    || !isOwnedOffer(slot.ordinal(), offer)
+                    || !sameTradeItem(offer.getItemId(), expectedItemId)) {
+                return true;
+            }
+            return offer.getState() != state;
+        }, false);
     }
 
     /**
@@ -360,71 +537,127 @@ public class BankSellerScript extends Script {
             return false;
         }
         List<GrandExchangeSlots> ownedSlots = findOwnedActiveSlots();
+        if (ownedSlots == null) {
+            return false;
+        }
         if (ownedSlots.isEmpty()) {
-            // Everything this run listed already filled (or nothing was listed)
+            if (!Rs2Inventory.all(this::isLiquidationTarget).isEmpty()) {
+                return relistRecoveredItemsAtOneGp();
+            }
+            // Everything this run listed already filled (or nothing was listed).
+            Rs2GrandExchange.closeExchange();
+            sleepUntil(() -> !Rs2GrandExchange.isOpen());
             return true;
         }
         announce("Leftover offer(s) not selling - re-listing at 1gp");
 
-        // Abort every owned offer that is still open
+        // Freeze the item identity of each owned slot before any UI action so
+        // every later abort/collect can be revalidated against the same offer.
+        Map<GrandExchangeSlots, Integer> expectedItemsBySlot = new LinkedHashMap<>();
         for (GrandExchangeSlots slot : ownedSlots) {
-            if (Thread.currentThread().isInterrupted()) {
-                break;
-            }
             GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
-            if (details == null || details.getState() != GrandExchangeOfferState.SELLING) {
+            if (details == null) {
+                return false;
+            }
+            expectedItemsBySlot.put(slot, details.getItemId());
+        }
+
+        // Abort every owned offer that is still open
+        for (Map.Entry<GrandExchangeSlots, Integer> entry : expectedItemsBySlot.entrySet()) {
+            if (Thread.currentThread().isInterrupted()) {
+                return false;
+            }
+            GrandExchangeSlots slot = entry.getKey();
+            int itemId = entry.getValue();
+            GrandExchangeOfferState state = ownedSlotState(slot, itemId);
+            if (state == null) {
+                if (isOwnedSlotResolved(slot, itemId)) {
+                    continue;
+                }
+                return false;
+            }
+            if (state != GrandExchangeOfferState.SELLING) {
                 continue;
             }
-            int itemId = details.getItemId();
             abortSlotOffer(slot);
             // Wait for the abort to register before moving to the next slot
-            sleepUntil(() -> ownedSlotState(slot, itemId) != GrandExchangeOfferState.SELLING, SETUP_WAIT_TIMEOUT_MS);
+            if (!sleepUntil(() -> hasOwnedSlotLeftState(
+                    slot, itemId, GrandExchangeOfferState.SELLING), SETUP_WAIT_TIMEOUT_MS)) {
+                return false;
+            }
             sleep(400, 700);
         }
 
         // Collect each owned slot on its own (cancelled offers return the items,
         // offers that filled meanwhile return coins)
-        for (GrandExchangeSlots slot : ownedSlots) {
+        for (Map.Entry<GrandExchangeSlots, Integer> entry : expectedItemsBySlot.entrySet()) {
             if (Thread.currentThread().isInterrupted()) {
-                break;
+                return false;
             }
-            GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
-            if (details == null) {
-                continue;
+            GrandExchangeSlots slot = entry.getKey();
+            int itemId = entry.getValue();
+            GrandExchangeOfferState state = ownedSlotState(slot, itemId);
+            if (state == null) {
+                if (isOwnedSlotResolved(slot, itemId)) {
+                    continue;
+                }
+                return false;
             }
-            GrandExchangeOfferState state = details.getState();
             if (state != GrandExchangeOfferState.CANCELLED_SELL && state != GrandExchangeOfferState.SOLD) {
-                continue;
+                return false;
             }
-            Rs2GrandExchange.collectOffer(slot, false);
+            if (!Rs2GrandExchange.collectOffer(slot, false)
+                    || !sleepUntil(() -> isOwnedSlotResolved(slot, itemId), SETUP_WAIT_TIMEOUT_MS)) {
+                if (Rs2GrandExchange.isOfferScreenOpen()) {
+                    Rs2GrandExchange.backToOverview();
+                }
+                return false;
+            }
             sleep(300, 500);
-            Rs2GrandExchange.backToOverview();
-            sleep(300, 500);
+            if (Rs2GrandExchange.isOfferScreenOpen()) {
+                Rs2GrandExchange.backToOverview();
+                sleep(300, 500);
+            }
         }
 
-        boolean itemsBack = !Rs2Inventory.all(this::isLiquidationTarget).isEmpty();
-        if (itemsBack) {
-            forcedSellPrice = 1;
-            liquidatingOwned = true;
-            try {
-                sellInventory();
-            } finally {
-                liquidatingOwned = false;
-                forcedSellPrice = null;
-            }
-            return true;
-        }
-
-        // Nothing came back to the inventory: fine when every owned offer filled,
-        // but an offer still in SELLING state means its abort never registered -
-        // report failure so the watch retries instead of waiting 90s again
-        for (GrandExchangeSlots slot : ownedSlots) {
-            GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
-            if (details != null && details.getState() == GrandExchangeOfferState.SELLING) {
+        // Every original slot must be conclusively empty/replaced before any
+        // recovered item is re-listed. A failed read or collect is retried.
+        for (Map.Entry<GrandExchangeSlots, Integer> entry : expectedItemsBySlot.entrySet()) {
+            if (!isOwnedSlotResolved(entry.getKey(), entry.getValue())) {
                 return false;
             }
         }
+
+        if (!Rs2Inventory.all(this::isLiquidationTarget).isEmpty()) {
+            return relistRecoveredItemsAtOneGp();
+        }
+
+        // Every offer filled while we were aborting, so only coins came back.
+        Rs2GrandExchange.closeExchange();
+        sleepUntil(() -> !Rs2GrandExchange.isOpen());
         return true;
+    }
+
+    /** Re-lists every recovered owned stack and proves that each placement succeeded. */
+    private boolean relistRecoveredItemsAtOneGp() {
+        Set<Integer> recoveredItemIds = Rs2Inventory.all(this::isLiquidationTarget).stream()
+                .map(Rs2ItemModel::getUnNotedId)
+                .collect(Collectors.toSet());
+        if (recoveredItemIds.isEmpty()) {
+            return true;
+        }
+        int offersBefore = sessionOffersPlaced;
+        forcedSellPrice = 1;
+        liquidatingOwned = true;
+        try {
+            sellInventory();
+        } finally {
+            liquidatingOwned = false;
+            forcedSellPrice = null;
+        }
+        boolean allRecoveredItemsLeftInventory = Rs2Inventory.all(this::isLiquidationTarget).isEmpty();
+        int offersPlaced = sessionOffersPlaced - offersBefore;
+        return allRecoveredItemsLeftInventory && offersPlaced >= recoveredItemIds.size();
     }
 
     /**
@@ -554,8 +787,12 @@ public class BankSellerScript extends Script {
                 }
             }
 
-            waitForAvailableSlot();
-            if (Rs2GrandExchange.getAvailableSlotsCount() == 0) {
+            if (!waitForAvailableSlot()) {
+                break;
+            }
+            if (!releaseEmptyForeignSlots()) {
+                // Do not place an offer until a reliable client read establishes
+                // which formerly foreign slots are now safe for Bank Seller to own.
                 break;
             }
 
@@ -820,14 +1057,60 @@ public class BankSellerScript extends Script {
         return false;
     }
 
-    private void waitForAvailableSlot() {
+    private boolean waitForAvailableSlot() {
         while (Rs2GrandExchange.getAvailableSlotsCount() == 0) {
-            if (Rs2GrandExchange.hasSoldOffer()) {
-                Rs2GrandExchange.collectAllToBank();
+            if (hasOwnedSoldOffer() && !collectOwnedSoldOffersToBank()) {
+                // A slot-targeted collect failed. Leave the GE and retry on a
+                // later pass instead of spinning while the SOLD state remains.
+                waitForSafeOfferSlot();
+                return false;
             }
-            sleepUntil(() -> Rs2GrandExchange.getAvailableSlotsCount() > 0
-                    || Rs2GrandExchange.hasSoldOffer());
+            if (Rs2GrandExchange.getAvailableSlotsCount() > 0) {
+                waitingForOfferSlot = false;
+                return true;
+            }
+            if (!hasOwnedActiveOffers()) {
+                // Every occupied slot is foreign, so Bank Seller has nothing it
+                // is allowed to collect in order to make room.
+                waitForSafeOfferSlot();
+                return false;
+            }
+            if (!sleepUntil(() -> Rs2GrandExchange.getAvailableSlotsCount() > 0
+                    || hasOwnedSoldOffer(), EXCHANGE_OPEN_TIMEOUT_MS)) {
+                waitForSafeOfferSlot();
+                return false;
+            }
         }
+        waitingForOfferSlot = false;
+        return true;
+    }
+
+    /**
+     * A slot occupied at startup remains foreign until a reliable client read
+     * observes it EMPTY. Once empty it can safely be reused and owned by this run.
+     */
+    private boolean releaseEmptyForeignSlots() {
+        return clientValue(() -> {
+            GrandExchangeOffer[] offers = Microbot.getClient().getGrandExchangeOffers();
+            if (offers == null || offers.length == 0) {
+                return false;
+            }
+            foreignSlotOrdinals.removeIf(slotOrdinal -> {
+                if (slotOrdinal < 0 || slotOrdinal >= offers.length) {
+                    return false;
+                }
+                GrandExchangeOffer offer = offers[slotOrdinal];
+                return offer == null || offer.getState() == GrandExchangeOfferState.EMPTY;
+            });
+            return true;
+        }, false);
+    }
+
+    private void waitForSafeOfferSlot() {
+        if (!waitingForOfferSlot) {
+            Microbot.log("No safe Grand Exchange slot is available; waiting without touching pre-existing offers");
+        }
+        waitingForOfferSlot = true;
     }
 
     private void depositUnsellableItems(List<Rs2ItemModel> failedItems) {
@@ -1198,7 +1481,7 @@ public class BankSellerScript extends Script {
             return "Nothing left to sell - " + sessionStacksRefused
                     + " stack(s) were refused by the GE. Stopping.";
         }
-        return "Nothing left to sell and all Grand Exchange slots are empty - stopping";
+        return "Nothing left to sell and all Bank Seller offers are complete - stopping";
     }
 
     private <T> T clientValue(Supplier<T> supplier, T fallback) {
