@@ -55,6 +55,10 @@ public class BankSellerScript extends Script {
     private static final int CONFIRM_WAIT_TIMEOUT_MS = 10_000;
     private static final int MAX_OFFER_ATTEMPTS = 2;
 
+    /** Give the GE overview at least one game tick to rebuild after collecting a slot. */
+    private static final int COLLECTION_OVERVIEW_SETTLE_MIN_MS = 700;
+    private static final int COLLECTION_OVERVIEW_SETTLE_MAX_MS = 1_000;
+
     /** An unsold leftover offer gets this long to fill before it is re-listed at 1gp. */
     private static final int LEFTOVER_OFFER_TIMEOUT_MS = 90_000;
 
@@ -242,7 +246,11 @@ public class BankSellerScript extends Script {
                     // bank, withdraw and reopen the GE while all slots are foreign.
                     return;
                 }
-                collectSoldOffers();
+                if (processOneSoldOffer()) {
+                    // End this scheduled pass after one collection attempt. A
+                    // fresh GE visit handles the next slot on the next pass.
+                    return;
+                }
 
                 if (waitingForOfferSlot) {
                     if (Rs2GrandExchange.getAvailableSlotsCount() == 0) {
@@ -320,20 +328,24 @@ public class BankSellerScript extends Script {
         return Rs2Inventory.all(this::isSellable).size() > 0;
     }
 
-    private void collectSoldOffers() {
+    /**
+     * @return true when this pass was reserved for an owned sold slot, even if
+     *         the GE UI attempt failed and must be retried next pass
+     */
+    private boolean processOneSoldOffer() {
         if (!hasOwnedSoldOffer()) {
-            return;
+            return false;
         }
         if (!Rs2GrandExchange.openExchange()) {
-            return;
+            return true;
         }
         if (!sleepUntil(Rs2GrandExchange::isOpen, EXCHANGE_OPEN_TIMEOUT_MS)) {
-            return;
+            return true;
         }
         collectOwnedSoldOffersToBank();
-        sleepUntil(() -> !hasOwnedSoldOffer(), SETUP_WAIT_TIMEOUT_MS);
         Rs2GrandExchange.closeExchange();
         sleepUntil(() -> !Rs2GrandExchange.isOpen());
+        return true;
     }
 
     /**
@@ -341,7 +353,7 @@ public class BankSellerScript extends Script {
      * Only a positively opened exchange counts - a failed open means "unknown",
      * never "done".
      *
-     * @return true when every Grand Exchange slot is empty and the plugin can stop
+     * @return true when every owned Grand Exchange slot is empty and the plugin can stop
      */
     private boolean collectPendingOffers() {
         if (!Rs2GrandExchange.openExchange()) {
@@ -351,7 +363,6 @@ public class BankSellerScript extends Script {
             return false;
         }
         collectOwnedSoldOffersToBank();
-        sleepUntil(() -> !hasOwnedSoldOffer(), SETUP_WAIT_TIMEOUT_MS);
         boolean allOwnedSlotsEmpty = !hasOwnedActiveOffers();
         Rs2GrandExchange.closeExchange();
         sleepUntil(() -> !Rs2GrandExchange.isOpen());
@@ -431,22 +442,28 @@ public class BankSellerScript extends Script {
     }
 
     /**
-     * Collects completed sell offers one slot at a time. The global collect-all
-     * action is deliberately forbidden because it also clears pre-existing buy
-     * and sell offers owned by the player.
+     * Collects at most one completed sell offer per invocation. The global
+     * collect-all action is deliberately forbidden because it also clears
+     * pre-existing buy and sell offers owned by the player.
+     *
+     * <p>Microbot's targeted collect returns as soon as the offer screen hides,
+     * before the GE overview children have necessarily rebuilt. Opening a
+     * second slot in the same pass races its collect-button population. The
+     * caller therefore closes the GE after one slot and handles the next slot
+     * on a later scheduled pass.</p>
+     *
+     * @return true when one owned sold slot was collected and resolved
      */
     private boolean collectOwnedSoldOffersToBank() {
         List<GrandExchangeSlots> ownedSlots = findOwnedActiveSlots();
         if (ownedSlots == null) {
             return false;
         }
-        boolean foundSoldOffer = false;
         for (GrandExchangeSlots slot : ownedSlots) {
             GrandExchangeOfferDetails details = Rs2GrandExchange.getOfferDetails(slot);
             if (details == null || details.getState() != GrandExchangeOfferState.SOLD) {
                 continue;
             }
-            foundSoldOffer = true;
             int expectedItemId = details.getItemId();
             if (ownedSlotState(slot, expectedItemId) != GrandExchangeOfferState.SOLD) {
                 return false;
@@ -458,12 +475,14 @@ public class BankSellerScript extends Script {
                 }
                 return false;
             }
-            if (Rs2GrandExchange.isOfferScreenOpen()) {
-                Rs2GrandExchange.backToOverview();
-                sleep(300, 500);
+            if (!sleepUntil(() -> Rs2GrandExchange.isOpen()
+                    && !Rs2GrandExchange.isOfferScreenOpen(), SETUP_WAIT_TIMEOUT_MS)) {
+                return false;
             }
+            sleep(COLLECTION_OVERVIEW_SETTLE_MIN_MS, COLLECTION_OVERVIEW_SETTLE_MAX_MS);
+            return true;
         }
-        return foundSoldOffer;
+        return false;
     }
 
     /**
@@ -613,11 +632,14 @@ public class BankSellerScript extends Script {
                 }
                 return false;
             }
-            sleep(300, 500);
             if (Rs2GrandExchange.isOfferScreenOpen()) {
                 Rs2GrandExchange.backToOverview();
-                sleep(300, 500);
             }
+            if (!sleepUntil(() -> Rs2GrandExchange.isOpen()
+                    && !Rs2GrandExchange.isOfferScreenOpen(), SETUP_WAIT_TIMEOUT_MS)) {
+                return false;
+            }
+            sleep(COLLECTION_OVERVIEW_SETTLE_MIN_MS, COLLECTION_OVERVIEW_SETTLE_MAX_MS);
         }
 
         // Every original slot must be conclusively empty/replaced before any
@@ -1059,10 +1081,18 @@ public class BankSellerScript extends Script {
 
     private boolean waitForAvailableSlot() {
         while (Rs2GrandExchange.getAvailableSlotsCount() == 0) {
-            if (hasOwnedSoldOffer() && !collectOwnedSoldOffersToBank()) {
-                // A slot-targeted collect failed. Leave the GE and retry on a
-                // later pass instead of spinning while the SOLD state remains.
-                waitForSafeOfferSlot();
+            if (hasOwnedSoldOffer()) {
+                boolean collected = collectOwnedSoldOffersToBank();
+                if (!collected) {
+                    // A slot-targeted collect failed. Leave the GE and retry on a
+                    // later pass instead of spinning while the SOLD state remains.
+                    waitForSafeOfferSlot();
+                } else {
+                    waitingForOfferSlot = false;
+                }
+                // Even when a slot was freed, stop this sell pass. Reopening the
+                // GE on the next scheduled pass prevents a second collection from
+                // racing the overview widget rebuild.
                 return false;
             }
             if (Rs2GrandExchange.getAvailableSlotsCount() > 0) {

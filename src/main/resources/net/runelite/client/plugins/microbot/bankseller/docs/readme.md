@@ -28,7 +28,7 @@ The plugin will loop Withdrawing and Selling items till neither the bank & Inven
 
 ## Technical Details
 
-- **Plugin Version**: 1.0.4
+- **Plugin Version**: 1.0.5
 - **Author**: KSP
 - **Minimum Client Version**: 1.9.8
 - **Dependencies**: N/A
