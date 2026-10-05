@@ -1,144 +1,102 @@
 # Chatbot Plugin
 
-AI-powered in-game chatbot for Microbot Hub using OpenAI Chat Completions.
+AI-powered in-game chatbot for Microbot Hub. Listens to in-game chat and responds intelligently with human-like OSRS speech patterns, context awareness, and intelligent anti-spam filtering.
 
-## What it does
-- Listens to selected in-game chat channels.
-- Sends messages to OpenAI and generates short OSRS-style replies.
-- Replies in the matching channel behavior currently supported:
-  - Public input -> Public reply (if enabled)
-  - Clan input -> Clan reply
-  - Friends Chat input -> Public reply (current behavior)
-  - Private Messages -> Disabled (not listened to / working)
+---
 
-## OpenAI Access Token Setup
-1. Sign in to OpenAI and create an API key in your API dashboard: https://platform.openai.com/api-keys
-2. Copy the key (it starts with `sk-...`).
-3. In RuneLite -> Chatbot plugin settings -> **OpenAI Settings** -> **API Key**.
-4. Paste your key into **API Key**.
-5. Keep it private. Do not share screenshots/logs containing your key.
+## Key Features
 
-If the key is empty or invalid, the plugin will not respond.
+1. **Multi-Provider AI Support**:
+   - **Google Gemini** (Generous free tier, fastest responses):
+     - `Gemini 3.5 Flash Lite` (Recommended default)
+     - `Gemini 3.8 Flash`
+     - Automatic silent fallback between Gemini models if rate-limited (`HTTP 429`) or under high demand (`HTTP 503`).
+   - **OpenCode** (Free models, DeepSeek, Llama 3.3 70B, Custom).
+   - **GroqCloud** (Ultra-fast Llama 3.3 70B and 3.1 8B).
+   - **OpenRouter** (Free community models).
+   - **OpenAI** (GPT-4o Mini, GPT-4o).
+   - **Custom / Local** (Ollama, LM Studio, or any OpenAI-compatible API).
+
+2. **Natural OSRS Player Speech**:
+   - All-lowercase, casual tone with common OSRS slang and abbreviations (`u`, `ur`, `r`, `lvl`, `wc`, `fm`, `ge`, `gp`, `gzz`, `ty`, `yw`, `gl`, `tbh`, `idk`, `lmao`).
+   - Trailing formal periods are stripped.
+   - Optional human typing mistakes/transpositions (e.g. `choppin`, `fir`, `jsut`, `gzz`).
+   - Built-in bot/script leak sanitizer ensures internal automation details never appear in chat.
+
+3. **Dynamic Player Addressing & Conversation Continuity**:
+   - Automatically detects when a player addresses you by your character name or custom nicknames.
+   - Dynamically remembers active conversation partners for multi-turn dialogues.
+   - Detects direct nearby player questions (`wc lvl?`, `bot?`, `u there?`, `can u hop?`).
+
+4. **GE Spam & Gambling Bot Filter**:
+   - Automatically filters out Grand Exchange shout spammers, gambling bots (`55x2`, `dicing`, `roll`), fake YouTube giveaways, and doubling scams.
+
+5. **Safe Test Mode**:
+   - When **Press Enter to Send** is disabled, the bot types the response into your chatbox, leaves it visible for ~2 seconds so you can preview it, and then backspaces every character away.
+   - Leaves your chatbox completely empty and clean, preventing accidental public messaging.
+
+6. **Privacy & Hub Compliance**:
+   - **Zero Secret Retention**: API keys are tagged `@ConfigItem(secret = true)` for encrypted storage, and keys are scrubbed from all logs.
+   - **No Private DM Snooping**: Private chat messages (`PRIVATECHAT`) are completely ignored.
+   - **Opt-In Only Logging**: Chat logging (`logChatToFile`) defaults to `false`.
+   - **No Background Config Mutations**: The plugin never overwrites your configuration behind the scenes.
+   - **Zero Telemetry**: Direct client-to-API communication only.
+
+---
+
+## Quick Start (Google Gemini - Free)
+
+1. Get a free API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+2. In RuneLite -> Settings -> **Chatbot**:
+   - **AI Provider**: `Google Gemini`
+   - **API Key**: Paste your key
+   - **Model**: `Gemini 3.5 Flash Lite`
+3. Toggle **Chatbot** ON.
+4. By default, **Press Enter to Send** is OFF so you can test responses safely in the chatbox. Once satisfied, check **Press Enter to Send** to speak in-game.
+
+---
 
 ## Configuration Reference
 
-### OpenAI Settings
-- **API Key** (`openAiApiKey`)
-  - Your OpenAI API key.
-  - Required for responses.
-
-- **Model** (`openAiModel`)
-  - Model name sent to OpenAI.
-  - Default: `gpt-4o-mini`
-
-- **System Prompt** (`systemPrompt`)
-  - Defines personality and response style.
-  - Default is OSRS-friendly short-chat behavior.
-
-- **Max Tokens** (`maxTokens`)
-  - Maximum tokens requested from OpenAI per reply.
-  - Lower = shorter/cheaper responses.
-  - Default: `60`
-
-- **Temperature** (`temperature`)
-  - Creativity/randomness as text value (e.g. `0.7`).
-  - Lower = more deterministic, higher = more varied.
-  - Default: `0.7`
+### AI Provider Settings
+| Setting | Key | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **AI Provider** | `aiProvider` | `Google Gemini` | Select AI service (Google Gemini, OpenCode, Groq, OpenRouter, OpenAI, Custom). |
+| **API Key** | `openAiApiKey` | *(empty)* | API key for the selected service (stored securely with `secret = true`). |
+| **Model** | `aiModel` | `Gemini 3.5 Flash Lite` | Active model for the selected provider. |
+| **Custom Model Name** | `customModelName` | *(empty)* | Custom model name if using Custom or Local endpoint. |
+| **Custom Endpoint URL** | `customApiUrl` | `http://localhost:11434/v1/chat/completions` | Custom/Local OpenAI-compatible URL. |
+| **System Prompt** | `systemPrompt` | *(OSRS default)* | System prompt establishing personality, slang, and bounds. |
+| **Max Tokens** | `maxTokens` | `600` | Token limit per reply. |
+| **Temperature** | `temperature` | `0.7` | Creativity level (0.0 = deterministic, 2.0 = creative). |
 
 ### Chat Sources
-- **Public Chat** (`listenPublicChat`)
-  - Listen/respond to public chat messages.
-  - Default: `true`
-
-- **Clan Chat** (`listenClanChat`)
-  - Listen/respond to clan chat messages.
-  - Default: `false`
-
-- **Friends Chat** (`listenFriendsChat`)
-  - Listen/respond to friends chat messages.
-  - Default: `false`
+| Setting | Key | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Public Chat** | `listenPublicChat` | `true` | Listen and respond to public chat. |
+| **Clan Chat** | `listenClanChat` | `false` | Listen and respond to clan chat messages. |
+| **Friends Chat** | `listenFriendsChat` | `false` | Listen and respond to friends chat messages. |
 
 ### Response Settings
-- **Min Response Delay (ms)** (`responseDelayMin`)
-  - Minimum human-like delay before typing.
-  - Default: `2000`
-
-- **Max Response Delay (ms)** (`responseDelayMax`)
-  - Maximum human-like delay before typing.
-  - Default: `5000`
-
-- **Respond in Public** (`respondViaPublic`)
-  - Enables public chat output for non-clan channels.
-  - If disabled, public/friends-chat inputs won’t send responses.
-  - Clan responses still use clan channel routing.
-  - Default: `true`
-
-- **Max Response Length** (`maxResponseLength`)
-  - Hard character cap after AI response.
-  - OSRS chatbox friendly.
-  - Default: `80`
-
-- **Conversation Memory** (`conversationMemory`)
-  - Number of recent user/assistant turns kept as context.
-  - Default: `10`
+| Setting | Key | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Min Response Delay (ms)** | `responseDelayMin` | `2000` | Minimum delay before typing to appear human. |
+| **Max Response Delay (ms)** | `responseDelayMax` | `5000` | Maximum delay before typing. |
+| **Respond in Public** | `respondViaPublic` | `true` | Send replies via public chat. |
+| **Max Response Length** | `maxResponseLength` | `80` | Maximum character length (OSRS chat limit is 80). |
+| **Conversation Memory** | `conversationMemory` | `10` | Recent turns kept for context memory. |
+| **Min Cooldown (s)** | `cooldownMinSeconds` | `3` | Minimum seconds between sending messages. |
+| **Max Cooldown (s)** | `cooldownMaxSeconds` | `15` | Maximum seconds between sending messages. |
+| **Press Enter to Send** | `pressEnterToSend` | `false` | If disabled, types in chatbox and backspaces away (test mode). |
 
 ### Filtering
-- **Only Respond To (names)** (`onlyRespondToNames`)
-  - Comma-separated allowlist. Empty = everyone.
-  - Example: `Name1,Name2`
-
-- **Ignore Names** (`ignoreNames`)
-  - Comma-separated blocklist.
-  - Example: `Spammer1,Spammer2`
-
-- **Trigger Keyword** (`triggerKeyword`)
-  - Only respond if message contains this keyword.
-  - Empty = no keyword filter.
-
-- **Ignore Own Messages** (`ignoreSelf`)
-  - Prevents responding to your own character’s messages.
-  - Default: `true`
-
-- **Cooldown (seconds)** (`cooldownSeconds`)
-  - Minimum time between responses.
-  - Default: `5`
-
-## Quick Start
-1. Enable plugin.
-2. Paste API key.
-3. Choose channels in **Chat Sources**.
-4. Adjust delay/cooldown to reduce spam-like behavior.
-5. Test in chat with short prompts.
-
-## Mass Worlds + Conversation Management
-- In busy/mass worlds, many messages can arrive quickly and be queued.
-- The plugin processes one queued message at a time on its loop.
-- If cooldown is active, the current message is put back into the queue and retried later.
-- Conversation context is shared (not per-player): recent user/assistant turns are kept in one rolling memory list.
-- `conversationMemory` controls how many recent turns are kept; older turns are dropped from the front.
-- Because memory is shared, heavy public chat can mix multiple speakers into context and reduce reply relevance.
-
-### Storage details
-- Message queue is in-memory only (runtime queue, not saved to disk).
-- Conversation history is in-memory only (runtime context, not persisted across restarts).
-- Queue/history are reset when the script starts and cleared on shutdown.
-
-### Recommended settings for mass worlds
-- Use **Trigger Keyword** so random public lines do not trigger responses.
-- Use **Only Respond To (names)** for controlled conversations.
-- Increase **Cooldown (seconds)** to reduce spam-like reply frequency.
-- Reduce **Conversation Memory** to keep context tighter and less polluted.
-
-## Troubleshooting
-- **No replies**
-  - Check API key, internet, and that desired chat source is enabled.
-  - Ensure cooldown is not active.
-
-- **Replies too long/too weird**
-  - Lower **Max Tokens** and/or **Temperature**.
-  - Tighten **System Prompt**.
-
-- **Replies in wrong place**
-  - Clan messages route to clan chat.
-  - Public messages route to public chat (when enabled).
-  - Private messages are disabled.
+| Setting | Key | Default | Description |
+| :--- | :--- | :--- | :--- |
+| **Only When Addressed** | `onlyRespondWhenAddressed` | `true` | Only responds when addressed by name, in active dialogue, or asked a question. |
+| **Filter GE & Trade Spam** | `filterGeTradeSpam` | `true` | Discards trade shouting, doubling, dicing, and scam bots. |
+| **Max Distance (tiles)** | `maxDistanceTiles` | `7` | Discards messages from players further than this distance. |
+| **Custom Nicknames** | `customNicknames` | *(empty)* | Additional nicknames you go by (e.g. `dave, davy`). |
+| **Trigger Words** | `triggerKeyword` | *(empty)* | Optional comma-separated trigger words. |
+| **Ignore Own Messages** | `ignoreSelf` | `true` | Prevents replying to yourself. |
+| **Only Respond To** | `onlyRespondToNames` | *(empty)* | Comma-separated list of allowed players. |
+| **Ignore Names** | `ignoreNames` | *(empty)* | Comma-separated list of ignored players. |

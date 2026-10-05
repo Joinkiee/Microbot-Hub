@@ -6,6 +6,7 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.microbot.PluginConstants;
@@ -17,8 +18,8 @@ import java.awt.*;
 
 @PluginDescriptor(
 	name = PluginConstants.DEFAULT_PREFIX + "Chatbot",
-	description = "AI-powered chatbot using OpenAI. Reads in-game chat and responds intelligently.",
-	tags = {"chatbot", "openai", "ai", "chat", "gpt"},
+	description = "AI-powered chatbot using Google Gemini or OpenAI. Reads in-game chat and responds intelligently.",
+	tags = {"chatbot", "gemini", "openai", "ai", "chat", "gpt"},
 	authors = { "Bender" },
 	version = ChatbotPlugin.version,
 	minClientVersion = "1.9.8",
@@ -28,10 +29,13 @@ import java.awt.*;
 @Slf4j
 public class ChatbotPlugin extends Plugin {
 
-    static final String version = "1.0.0";
+    static final String version = "1.1.0";
 
     @Inject
     private ChatbotConfig config;
+
+    @Inject
+    private ConfigManager configManager;
 
     @Provides
     ChatbotConfig provideConfig(ConfigManager configManager) {
@@ -53,11 +57,13 @@ public class ChatbotPlugin extends Plugin {
             overlayManager.add(chatbotOverlay);
         }
         chatbotScript.run();
+        ChatbotConfigUIFilter.install(config, configManager);
         log.info("[Chatbot] Plugin started");
     }
 
     @Override
     protected void shutDown() {
+        ChatbotConfigUIFilter.uninstall();
         chatbotScript.shutdown();
         if (overlayManager != null) {
             overlayManager.remove(chatbotOverlay);
@@ -66,10 +72,20 @@ public class ChatbotPlugin extends Plugin {
     }
 
     @Subscribe
+    public void onConfigChanged(ConfigChanged event) {
+        if (!ChatbotConfig.configGroup.equals(event.getGroup())) {
+            return;
+        }
+        if ("aiProvider".equals(event.getKey())) {
+            ChatbotConfigUIFilter.onProviderChanged(config, configManager);
+        }
+    }
+
+    @Subscribe
     public void onChatMessage(ChatMessage chatMessage) {
         ChatMessageType type = chatMessage.getType();
-        String sender = Text.removeTags(chatMessage.getName());
-        String message = Text.removeTags(chatMessage.getMessage());
+        String sender = chatMessage.getName() != null ? Text.removeTags(chatMessage.getName()).replace('\u00A0', ' ').trim() : "";
+        String message = chatMessage.getMessage() != null ? Text.removeTags(chatMessage.getMessage()).replace('\u00A0', ' ').trim() : "";
 
         // Determine if this chat type is enabled
         String chatType;
