@@ -79,13 +79,16 @@ public class FlipperScript extends Script {
 	private long geClosedSince = 0;
 	private long strayPageSince = 0;
     private final WaitingMouse waitingMouse = new WaitingMouse();
+    private final WaitingMousePresets waitingMousePresets = new WaitingMousePresets();
     private final GeflipperMouseMotion mouseMotion = new GeflipperMouseMotion();
     private final FinishSession finishSession = new FinishSession();
     private volatile Runnable finishCallback;
     private volatile boolean finishComplete;
     private volatile long completedFinishGeneration;
     private volatile Runnable settingsAvailabilityChanged;
+    private volatile Runnable waitingMouseFrequencyChanged;
     private boolean lastSettingsAvailable;
+    private int lastWaitingMouseFrequency = -1;
 
 	private int[] grandExchangeSlotIds = new int[] {
 		InterfaceID.GeOffers.INDEX_0,
@@ -372,6 +375,7 @@ public class FlipperScript extends Script {
             } finally {
                 if (!waitingTick) resetWaitingMouse();
                 notifySettingsAvailabilityChanged();
+                notifyWaitingMouseFrequencyChanged();
             }
         }, 0, SCHEDULE_INTERVAL_MS, TimeUnit.MILLISECONDS);
         LIVE_FUTURES.add(mainScheduledFuture);
@@ -403,7 +407,32 @@ public class FlipperScript extends Script {
     }
 
     int waitingMouseFrequency(FlipperConfig settings) {
-        return settings == null ? 0 : settings.waitingMouseChance();
+        return settings == null ? 0 : waitingMousePresets.frequency(settings);
+    }
+
+    String waitingMouseDescription(FlipperConfig settings) {
+        if (settings == null) return "Waiting mouse randomization";
+        String description = waitingMousePresets.description(settings);
+        return settings.waitingMousePreset() == FlipperConfig.RandomizationPreset.DAY_FATIGUE
+            && settings.randomizeMouseSpeed()
+            ? description + " This preset controls the slider; select Custom to edit it."
+            : description;
+    }
+
+    void resetWaitingMousePresets() {
+        waitingMousePresets.reset();
+    }
+
+    void setWaitingMouseFrequencyChanged(Runnable listener) {
+        waitingMouseFrequencyChanged = listener;
+    }
+
+    private void notifyWaitingMouseFrequencyChanged() {
+        int frequency = waitingMouseFrequency(config);
+        if (frequency == lastWaitingMouseFrequency) return;
+        lastWaitingMouseFrequency = frequency;
+        Runnable listener = waitingMouseFrequencyChanged;
+        if (listener != null) listener.run();
     }
 
     boolean isFinishing() { return finishSession.isRequested(); }
