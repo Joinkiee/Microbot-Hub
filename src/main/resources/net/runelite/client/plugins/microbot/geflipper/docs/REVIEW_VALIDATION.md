@@ -47,3 +47,10 @@ The user reported End / Finish working in a live test of 1.2.70. This report doe
 The normal Hub build creates the versioned plugin JAR. The main-branch workflow generates release metadata and documentation, then publishes assets under `latest-release`. The plugin implements no independent updater.
 
 Inspect the JAR for Java 11 bytecode and GE Flipper classes/resources only. Exclude raw logs, exports, screenshots of private sessions, backups, machine paths, credentials, and account details from the submitted change and release assets. No release or repository update is performed by this validation document.
+
+
+## Version 1.2.81
+
+A waiting movement is counted only after the virtual cursor actually leaves the game canvas. Refused attempts receive a fresh randomized delay; stale completion cannot park a new wait. The existing native Randomization slider moves one point for arrow, page and track actions without changing shared Swing defaults. Existing trading and Finish behavior is retained.
+
+This focused candidate is based on upstream development. With JDK 11, the minimum-client 2.6.26 run passed all 155 GE Flipper tests across 16 suites. The normal full Hub clean build against the default SDK 2.6.30 passed all 292 tests across 42 suites, including those same 155 GE Flipper tests, and plugin-health validation. The minimum and default SDK builds produced byte-identical JARs declaring version 1.2.81 and minimum client 2.6.26, containing 44 GE Flipper classes with Java 11 bytecode. Packaging/privacy inspection and static linkage against both SDKs passed. Historical results above apply only to their named versions. Fresh required GitHub CI must pass before merge.

@@ -746,11 +746,18 @@ public class FlipperScript extends Script {
                         PointerState.isOutside(), Microbot.getClient().getCanvasWidth(),
                         Microbot.getClient().getCanvasHeight()));
                 }
-                public void moveOffScreen() {
-                    // Use the shared primitive on this worker without changing global antiban state.
+                public boolean moveOffScreen() {
                     Rs2Antiban.moveMouseOffScreen();
-                    if (!insideCanvas()) log.info("Waiting mouse: cursor is outside the game canvas.");
+                    boolean outside = readUi(() -> {
+                        java.awt.Point point = Microbot.getMouse().getMousePosition();
+                        int width = Microbot.getClient().getCanvasWidth();
+                        int height = Microbot.getClient().getCanvasHeight();
+                        return point != null && width > 0 && height > 0
+                            && !WaitingMouse.insideCanvas(point, PointerState.isOutside(), width, height);
+                    });
+                    if (outside) log.info("Waiting mouse: cursor is outside the game canvas.");
                     else log.debug("Waiting mouse: off-screen movement requested; exit not yet observed.");
+                    return outside;
                 }
             });
     }

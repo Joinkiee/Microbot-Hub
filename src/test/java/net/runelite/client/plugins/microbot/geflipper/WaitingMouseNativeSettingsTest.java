@@ -1,5 +1,17 @@
 package net.runelite.client.plugins.microbot.geflipper;
 
+import com.formdev.flatlaf.ui.FlatSliderUI;
+import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
+import javax.swing.Action;
+import javax.swing.KeyStroke;
+import javax.swing.LookAndFeel;
+import javax.swing.UIManager;
+import javax.swing.plaf.basic.BasicSliderUI;
+import net.runelite.client.ui.laf.RuneLiteLAF;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Container;
@@ -344,6 +356,71 @@ class WaitingMouseNativeSettingsTest {
         } finally {
             onEdt(() -> { if (fixture[0] != null) fixture[0].close(); });
         }
+    }
+
+    @Test
+    void nativeThemeTrackPageAndArrowMovementsUseOnePercentWithoutChangingGlobalDefaults() throws Exception {
+        onEdt(() -> {
+            LookAndFeel previous = UIManager.getLookAndFeel();
+            try {
+                UIManager.setLookAndFeel(new RuneLiteLAF());
+                Object trackDefault = UIManager.get("Slider.scrollOnTrackClick");
+                assertFalse(UIManager.getBoolean("Slider.scrollOnTrackClick"), "Exercise FlatLaf's normal jump-to-track default");
+                try (Fixture fixture = new Fixture(temporary)) {
+                    fixture.settings.start();
+                    JSlider slider = fixture.slider();
+                    assertTrue(slider.getUI() instanceof FlatSliderUI, "Keep the client's native slider painting");
+                    Map<String, String> expected = fixture.preferences();
+                    clickTrack(slider, 90);
+                    assertEquals(48, slider.getValue());
+                    expected.put(FREQUENCY, "48");
+                    assertEquals(expected, fixture.preferences());
+                    clickTrack(slider, 5);
+                    assertEquals(47, slider.getValue());
+                    for (int key : new int[]{KeyEvent.VK_RIGHT, KeyEvent.VK_PAGE_UP}) {
+                        int before = slider.getValue();
+                        pressKey(slider, key);
+                        assertEquals(before + 1, slider.getValue());
+                    }
+                    for (int key : new int[]{KeyEvent.VK_LEFT, KeyEvent.VK_PAGE_DOWN}) {
+                        int before = slider.getValue();
+                        pressKey(slider, key);
+                        assertEquals(before - 1, slider.getValue());
+                    }
+                    expected.put(FREQUENCY, "47");
+                    assertEquals(expected, fixture.preferences());
+                    slider.updateUI();
+                    clickTrack(slider, 90);
+                    assertEquals(48, slider.getValue(), "Reinstalling the native UI must preserve 1% track steps");
+                    assertSame(trackDefault, UIManager.get("Slider.scrollOnTrackClick"));
+                    assertEquals(Collections.singleton(FREQUENCY), fixture.patches().keySet());
+                }
+            } finally {
+                UIManager.setLookAndFeel(previous);
+            }
+        });
+    }
+
+    private static void pressKey(JSlider slider, int key) {
+        Object binding = slider.getInputMap().get(KeyStroke.getKeyStroke(key, 0));
+        assertNotNull(binding);
+        Action action = slider.getActionMap().get(binding);
+        assertNotNull(action);
+        action.actionPerformed(new ActionEvent(slider, ActionEvent.ACTION_PERFORMED, binding.toString()));
+    }
+
+    private static void clickTrack(JSlider slider, int targetValue) {
+        slider.setSize(250, 40);
+        BufferedImage canvas = new BufferedImage(250, 40, BufferedImage.TYPE_INT_ARGB);
+        java.awt.Graphics graphics = canvas.getGraphics();
+        try { slider.paint(graphics); } finally { graphics.dispose(); }
+        BasicSliderUI ui = (BasicSliderUI) slider.getUI();
+        int x = 0;
+        while (x < slider.getWidth() && ui.valueForXPosition(x) < targetValue) x++;
+        slider.dispatchEvent(new MouseEvent(slider, MouseEvent.MOUSE_PRESSED, 0,
+            InputEvent.BUTTON1_DOWN_MASK, x, 20, 1, false, MouseEvent.BUTTON1));
+        slider.dispatchEvent(new MouseEvent(slider, MouseEvent.MOUSE_RELEASED, 0,
+            0, x, 20, 1, false, MouseEvent.BUTTON1));
     }
 
     private static void onEdt(CheckedRunnable task) throws Exception {

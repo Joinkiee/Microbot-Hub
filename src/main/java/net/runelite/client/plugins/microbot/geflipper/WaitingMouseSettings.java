@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.microbot.geflipper;
 
+import com.formdev.flatlaf.ui.FlatSliderUI;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -364,9 +365,10 @@ final class WaitingMouseSettings implements AutoCloseable {
             refresh();
             try {
                 finishAction.run();
+                if (!closed && active) refresh();
             } catch (RuntimeException failure) {
                 finishRequested = false;
-                refresh();
+                if (!closed && active) refresh();
                 throw failure;
             }
         }
@@ -387,7 +389,7 @@ final class WaitingMouseSettings implements AutoCloseable {
         private final JSpinner originalSpinner;
         private final Color originalLabelColor;
         private final boolean originalLabelEnabled;
-        private final JSlider slider = new JSlider(0, 100);
+        private final JSlider slider = new PercentageSlider();
         private final ChangeListener listener;
         private boolean refreshing;
         private boolean active = true;
@@ -404,6 +406,8 @@ final class WaitingMouseSettings implements AutoCloseable {
             slider.setOpaque(false);
             slider.setPaintTicks(false);
             slider.setPaintLabels(false);
+            slider.setMinorTickSpacing(1);
+            slider.setSnapToTicks(false);
             slider.getAccessibleContext().setAccessibleName(label.getText());
             slider.setToolTipText("Randomizes chance and waiting delays together. Move right for sooner, more frequent movement; fully left disables it.");
             listener = event -> changed();
@@ -487,6 +491,23 @@ final class WaitingMouseSettings implements AutoCloseable {
             }
             row.revalidate();
             row.repaint();
+        }
+    }
+
+    private static final class PercentageSlider extends JSlider {
+        private PercentageSlider() { super(0, 100); }
+
+        @Override public void updateUI() {
+            super.updateUI();
+            if (getUI() instanceof FlatSliderUI) {
+                // FlatLaf normally jumps to a clicked track position. Use Swing's track stepping
+                // only on this slider, retaining native FlatLaf painting and global UI defaults.
+                setUI(new FlatSliderUI() {
+                    @Override protected TrackListener createTrackListener(JSlider slider) {
+                        return new TrackListener();
+                    }
+                });
+            }
         }
     }
 

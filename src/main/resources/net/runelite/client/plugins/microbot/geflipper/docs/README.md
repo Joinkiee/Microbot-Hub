@@ -41,3 +41,8 @@ GE Flipper follows Copilot's suggestions; it does not choose its own items or ma
 Finish requires a supported, active Copilot session. Missing offer/inventory data, unavailable actions, paused suggestions, errors, or inventory items Copilot cannot sell leave it waiting with an overlay message rather than report success. Make inventory space manually if collection is blocked; Finish does not bank unrelated items or choose its own sale price. It handles offers and current inventory, not unrelated bank stock. Test this sequence before relying on unattended shutdown.
 
 Microbot 2.6.26–2.6.29 normally renders numeric configuration as a spinner. While GE Flipper is enabled, it replaces only its own Randomization row with a slider. Disabling the whole plugin restores the native number field. If a future client changes the settings layout, that native field remains available. No other plugin's settings or client classes are modified.
+
+
+## Version 1.2.81
+
+A waiting movement is counted only after the virtual cursor actually leaves the game canvas. Refused attempts receive a fresh randomized delay; stale completion cannot park a new wait. The existing native Randomization slider moves one point for arrow, page and track actions without changing shared Swing defaults. Existing trading and Finish behavior is retained.
