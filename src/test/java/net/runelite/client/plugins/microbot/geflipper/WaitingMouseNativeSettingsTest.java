@@ -490,6 +490,7 @@ class WaitingMouseNativeSettingsTest {
             properties.put(GROUP + ".verboseLogging", "false");
             properties.put(ENABLED, "true");
             properties.put(FREQUENCY, "47");
+            properties.put(GROUP + ".randomizeMouseSpeed", "false");
             properties.put("runelite.flipperplugin", "true");
             properties.put("flippingcopilot.slotActionSwap", "false");
             properties.put("microbot.enableAutoRunOn", "false");

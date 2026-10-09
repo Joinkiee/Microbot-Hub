@@ -35,7 +35,7 @@ import java.awt.*;
         isExternal = PluginConstants.IS_EXTERNAL
 )
 public class FlipperPlugin extends Plugin {
-    public static final String version = "1.2.81";
+    public static final String version = "1.2.82";
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(FlipperPlugin.class);
     @Inject
     private Client client;
@@ -112,6 +112,7 @@ public class FlipperPlugin extends Plugin {
             overlay.clearStats();
             if (overlayManager != null) overlayManager.add(overlay);
         }
+        flipperScript.setSettingsAvailabilityChanged(this::refreshWaitingMouseSettings);
         flipperScript.run(config);
         refreshWaitingMouseSettings();
     }
@@ -158,8 +159,19 @@ public class FlipperPlugin extends Plugin {
             warnIfSlotSwapOff();
         }
         if ("verboseLogging".equals(event.getKey())) applyOwnLogLevel();
+        if ("randomizeMouseSpeed".equals(event.getKey())) {
+            if (flipperScript != null) {
+                flipperScript.invalidateMouseMovement();
+                flipperScript.resetWaitingMouse();
+                flipperScript.waitingMouseFrequency(config);
+            }
+            refreshWaitingMouseSettings();
+        }
         if (event.getKey().startsWith("waitingMouse")) {
-            if (flipperScript != null) flipperScript.resetWaitingMouse();
+            if (flipperScript != null) {
+                flipperScript.resetWaitingMouse();
+                flipperScript.waitingMouseFrequency(config);
+            }
             refreshWaitingMouseSettings();
         }
         if ("showOverlay".equals(event.getKey()) && overlay != null && !config.showOverlay()) overlay.clearStats();
@@ -168,6 +180,7 @@ public class FlipperPlugin extends Plugin {
     @Subscribe
     public void onProfileChanged(ProfileChanged event) {
         if (flipperScript != null) {
+            flipperScript.invalidateMouseMovement();
             flipperScript.resetWaitingMouse();
             flipperScript.pauseFinishForProfileChange();
         }
@@ -176,9 +189,12 @@ public class FlipperPlugin extends Plugin {
 
     private void refreshWaitingMouseSettings() {
         WaitingMouseSettings panel = waitingMouseSettings;
-        if (panel != null) SwingUtilities.invokeLater(() -> {
+        if (panel == null) return;
+        Runnable refresh = () -> {
             if (waitingMouseSettings == panel) panel.refresh();
-        });
+        };
+        if (SwingUtilities.isEventDispatchThread()) refresh.run();
+        else SwingUtilities.invokeLater(refresh);
     }
 
     @Subscribe
@@ -192,6 +208,7 @@ public class FlipperPlugin extends Plugin {
     @Override
     protected void shutDown() {
         lifecycleGeneration++;
+        flipperScript.setSettingsAvailabilityChanged(null);
         flipperScript.shutdown();
         flipperScript.state = State.GOING_TO_GE;
         if (waitingMouseSettings != null) waitingMouseSettings.close();

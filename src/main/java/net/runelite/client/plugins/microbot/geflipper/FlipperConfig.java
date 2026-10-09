@@ -131,12 +131,23 @@ public interface FlipperConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "randomizeMouseSpeed",
+        name = "Randomize mouse speed",
+        description = "Vary speed for GE Flipper's waiting movements and directly controlled trading clicks. "
+            + "Each movement keeps a consistent pace. Off by default. "
+            + "SDK-managed walking, banking and other helper actions keep normal Microbot speed. "
+            + "Shared mouse and antiban preferences are preserved.",
+        position = 6
+    )
+    default boolean randomizeMouseSpeed() { return false; }
+
+    @ConfigItem(
         keyName = "finish",
         name = "End / Finish",
         description = "Cancel buy offers, collect purchased items, and follow Copilot's sell/Modify suggestions. "
             + "Stop GE Flipper once all items are listed; existing sell offers remain on the exchange. "
             + "Uses Copilot's sell and modify suggestions. Available while GE Flipper is running.",
-        position = 6
+        position = 7
     )
     default ConfigButton finish() {
         return null;

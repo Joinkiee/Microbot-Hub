@@ -79,10 +79,13 @@ public class FlipperScript extends Script {
 	private long geClosedSince = 0;
 	private long strayPageSince = 0;
     private final WaitingMouse waitingMouse = new WaitingMouse();
+    private final GeflipperMouseMotion mouseMotion = new GeflipperMouseMotion();
     private final FinishSession finishSession = new FinishSession();
     private volatile Runnable finishCallback;
     private volatile boolean finishComplete;
     private volatile long completedFinishGeneration;
+    private volatile Runnable settingsAvailabilityChanged;
+    private boolean lastSettingsAvailable;
 
 	private int[] grandExchangeSlotIds = new int[] {
 		InterfaceID.GeOffers.INDEX_0,
@@ -278,7 +281,7 @@ public class FlipperScript extends Script {
 											Widget abortBtn = waitForOfferScreenAbortButton(2000);
 											if (abortBtn != null && isUiWidgetVisible(abortBtn.getId())) {
 												log.info("Aborting offer via offer screen button '{}'", abortBtn.getId());
-												Rs2Widget.clickWidget(abortBtn);
+												if (!clickTradingWidget(abortBtn)) return;
 												sleep(300, 500);
 
 												// Check for confirmation dialog ('Are you sure...')
@@ -368,6 +371,7 @@ public class FlipperScript extends Script {
                 log.error("Error in FlipperScript: {} - ", ex.getClass().getSimpleName());
             } finally {
                 if (!waitingTick) resetWaitingMouse();
+                notifySettingsAvailabilityChanged();
             }
         }, 0, SCHEDULE_INTERVAL_MS, TimeUnit.MILLISECONDS);
         LIVE_FUTURES.add(mainScheduledFuture);
@@ -382,8 +386,24 @@ public class FlipperScript extends Script {
         finishComplete = false;
         blockedSlotActionKey = null;
         slotActionStatus = "";
-        resetWaitingMouse();
+        invalidateMouseMovement();
         return true;
+    }
+
+    void setSettingsAvailabilityChanged(Runnable listener) {
+        settingsAvailabilityChanged = listener;
+    }
+
+    private void notifySettingsAvailabilityChanged() {
+        boolean available = isRunning() && !isFinishing();
+        if (available == lastSettingsAvailable) return;
+        lastSettingsAvailable = available;
+        Runnable listener = settingsAvailabilityChanged;
+        if (listener != null) listener.run();
+    }
+
+    int waitingMouseFrequency(FlipperConfig settings) {
+        return settings == null ? 0 : settings.waitingMouseChance();
     }
 
     boolean isFinishing() { return finishSession.isRequested(); }
@@ -441,7 +461,7 @@ public class FlipperScript extends Script {
                 public net.runelite.api.Point actionPoint(int widgetId, SlotActionExecutor.Action action) {
                     return finishBuyStillActive(slot) ? slotActionPoint(widgetId, action) : null;
                 }
-                public void hover(net.runelite.api.Point point) { }
+                public boolean hover(net.runelite.api.Point point) { return true; }
                 public boolean awaitDefaultAction(int widgetId, SlotActionExecutor.Action action,
                                                   net.runelite.api.Point point) { return false; }
                 public boolean clickDefaultAction(int widgetId, SlotActionExecutor.Action action,
@@ -450,11 +470,10 @@ public class FlipperScript extends Script {
                                             net.runelite.api.Point point) {
                     if (Thread.currentThread().isInterrupted() || !finishBuyStillActive(slot)
                         || slotActionPoint(widgetId, action) == null) return false;
-                    Microbot.doInvoke(new NewMenuEntry().option(action.option).target("")
+                    return invokeTradingMouse(new NewMenuEntry().option(action.option).target("")
                         .identifier(action.identifier).type(MenuAction.CC_OP).param0(2).param1(widgetId)
                         .itemId(-1).forceLeftClick(false),
                         new Rectangle(point.getX() - 1, point.getY() - 1, 2, 2));
-                    return true;
                 }
             });
         lastActionTime = System.currentTimeMillis();
@@ -486,9 +505,9 @@ public class FlipperScript extends Script {
             || !finishSession.readyForCancellation()
             || Microbot.pauseAllScripts.get() || InputArbiter.isHuman()
             || !bounds.equals(finishCollectBounds())) return;
-        Microbot.doInvoke(new NewMenuEntry().option("Collect to inventory").target("")
+        if (!invokeTradingMouse(new NewMenuEntry().option("Collect to inventory").target("")
             .identifier(1).type(MenuAction.CC_OP).param0(0).param1((465 << 16) | 6)
-            .itemId(-1).forceLeftClick(false), bounds);
+            .itemId(-1).forceLeftClick(false), bounds)) return;
         slotActionStatus = "";
         lastActionTime = System.currentTimeMillis();
         actionCooldown = DEFAULT_ACTION_COOLDOWN;
@@ -696,7 +715,7 @@ public class FlipperScript extends Script {
     private boolean isBankOpen() { return readGeUi().bankOpen; }
     private boolean isOfferScreenOpen() { return readGeUi().offerOpen; }
 
-    private boolean isUiWidgetVisible(int id) {
+    boolean isUiWidgetVisible(int id) {
         return readUi(() -> {
             Widget widget = Microbot.getClient().getWidget(id);
             return widget != null && !widget.isHidden();
@@ -705,7 +724,7 @@ public class FlipperScript extends Script {
 
     private Widget findUiWidget(String text) { return findUiWidget(text, null, false); }
 
-    private Widget findUiWidget(String text, List<Widget> children, boolean exact) {
+    Widget findUiWidget(String text, List<Widget> children, boolean exact) {
         return readUi(() -> Rs2Widget.findWidget(text, children, exact));
     }
 
@@ -736,9 +755,95 @@ public class FlipperScript extends Script {
         waitingMouse.reset();
     }
 
+    void invalidateMouseMovement() {
+        tradingGeneration++;
+        resetWaitingMouse();
+    }
+
+    private boolean randomizeMouseSpeed() {
+        return config != null && config.randomizeMouseSpeed();
+    }
+
+    /** Cached checks only: never request ClientThread while a gesture owns the input loop. */
+    private BooleanSupplier mouseMovementGuard() {
+        long generation = tradingGeneration;
+        return () -> generation == tradingGeneration && isRunning() && randomizeMouseSpeed()
+            && !Thread.currentThread().isInterrupted() && !Microbot.pauseAllScripts.get()
+            && !InputArbiter.isHuman() && Microbot.isLoggedIn();
+    }
+
+    private net.runelite.api.Point tradingMousePoint(Rectangle bounds) {
+        return readUi(() -> bounds != null && bounds.width > 0 && bounds.height > 0
+            && Rs2UiHelper.isRectangleWithinCanvas(bounds)
+            ? Rs2UiHelper.getClickingPoint(bounds, true) : null);
+    }
+
+    private boolean clickTradingMouse(Rectangle bounds) {
+        if (!randomizeMouseSpeed()) {
+            Microbot.getMouse().click(bounds);
+            return true;
+        }
+        BooleanSupplier guard = mouseMovementGuard();
+        net.runelite.api.Point point = tradingMousePoint(bounds);
+        return point != null && mouseMotion.click(point, true, guard);
+    }
+
+    private boolean clickTradingMouse(net.runelite.api.Point point) {
+        if (!randomizeMouseSpeed()) {
+            Microbot.getMouse().click(point);
+            return true;
+        }
+        return mouseMotion.click(point, true, mouseMovementGuard());
+    }
+
+    boolean clickTradingWidget(Widget widget) {
+        if (!randomizeMouseSpeed()) {
+            Rs2Widget.clickWidget(widget);
+            return true;
+        }
+        BooleanSupplier guard = mouseMovementGuard();
+        Rectangle bounds = readUi(() -> widget == null || widget.isHidden() || widget.getBounds() == null
+            ? null : new Rectangle(widget.getBounds()));
+        net.runelite.api.Point point = tradingMousePoint(bounds);
+        return point != null && mouseMotion.click(point, true, guard);
+    }
+
+    private boolean invokeTradingMouse(NewMenuEntry entry, Rectangle bounds) {
+        if (!randomizeMouseSpeed()) {
+            Microbot.doInvoke(entry, bounds);
+            return true;
+        }
+        BooleanSupplier guard = mouseMovementGuard();
+        net.runelite.api.Point point = tradingMousePoint(bounds);
+        return point != null && mouseMotion.invoke(entry, point, true, guard);
+    }
+
+    private void moveWaitingMouseOffScreen() {
+        if (!randomizeMouseSpeed()) {
+            Rs2Antiban.moveMouseOffScreen();
+            return;
+        }
+        long waitingGeneration = waitingMouse.generation();
+        BooleanSupplier guard = mouseMovementGuard();
+        Object manager = suggestionManager;
+        Object controller = copilotController();
+        Dimension canvas = readUi(() -> new Dimension(Microbot.getClient().getCanvasWidth(),
+            Microbot.getClient().getCanvasHeight()));
+        if (canvas.width <= 0 || canvas.height <= 0) return;
+        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+        int side = random.nextInt(4);
+        int x = side == 0 ? -1 : side == 1 ? canvas.width + 1 : random.nextInt(canvas.width);
+        int y = side == 2 ? -1 : side == 3 ? canvas.height + 1 : random.nextInt(canvas.height);
+        mouseMotion.offscreen(new net.runelite.api.Point(x, y), true,
+            () -> guard.getAsBoolean() && waitingGeneration == waitingMouse.generation()
+                && config.waitingMouseOffScreen() && waitingMouseFrequency(config) > 0
+                && state == State.MONITORING_COPILOT
+                && manager == suggestionManager && WaitingMouse.copilotWaiting(manager, controller));
+    }
+
     private boolean moveMouseWhileWaiting() {
         return waitingMouse.tick(config != null && config.waitingMouseOffScreen(),
-            config == null ? 0 : config.waitingMouseChance(),
+            waitingMouseFrequency(config),
             TimeUnit.NANOSECONDS.toMillis(System.nanoTime()), new WaitingMouse.Context() {
                 public boolean waiting() { return isSafeMouseWait(); }
                 public boolean insideCanvas() {
@@ -747,7 +852,7 @@ public class FlipperScript extends Script {
                         Microbot.getClient().getCanvasHeight()));
                 }
                 public boolean moveOffScreen() {
-                    Rs2Antiban.moveMouseOffScreen();
+                    moveWaitingMouseOffScreen();
                     boolean outside = readUi(() -> {
                         java.awt.Point point = Microbot.getMouse().getMousePosition();
                         int width = Microbot.getClient().getCanvasWidth();
@@ -763,7 +868,7 @@ public class FlipperScript extends Script {
     }
 
     private boolean isSafeMouseWait() {
-        if (config == null || !config.waitingMouseOffScreen() || config.waitingMouseChance() <= 0
+        if (config == null || !config.waitingMouseOffScreen() || waitingMouseFrequency(config) <= 0
             || state != State.MONITORING_COPILOT
             || Thread.currentThread().isInterrupted() || Microbot.pauseAllScripts.get()
             || InputArbiter.isHuman() || !Microbot.isLoggedIn() || Microbot.naturalMouse == null
@@ -772,7 +877,7 @@ public class FlipperScript extends Script {
             || !Microbot.getPluginManager().isPluginEnabled(flippingCopilot)) return false;
         return readUi(() -> {
             if (!Microbot.isLoggedIn() || Microbot.pauseAllScripts.get() || InputArbiter.isHuman()
-                || !config.waitingMouseOffScreen() || config.waitingMouseChance() <= 0) return false;
+                || !config.waitingMouseOffScreen() || waitingMouseFrequency(config) <= 0) return false;
             GeUiState ui = readGeUi();
             if (!ui.exchangeOpen || !ui.overviewOpen || ui.offerOpen || ui.bankOpen
                 || Microbot.getClient().isMenuOpen() || Microbot.targetMenu != null
@@ -793,10 +898,12 @@ public class FlipperScript extends Script {
 
 	private void backToOverview() {
 		log.info("Returning to GE overview.");
-		Rs2GrandExchange.backToOverview();
-		if (isOfferScreenOpen()) {
-			Rs2Widget.clickWidget(30474244);
-		}
+		if (randomizeMouseSpeed()) {
+            if (!clickTradingWidget(readUi(() -> Microbot.getClient().getWidget(30474244)))) return;
+        } else {
+            Rs2GrandExchange.backToOverview();
+            if (isOfferScreenOpen()) Rs2Widget.clickWidget(30474244);
+        }
 		waitForUi(() -> !isOfferScreenOpen(), 2500);
 		offerScreenOpenTime = 0;
 		offerScreenActionCount = 0;
@@ -1259,7 +1366,7 @@ public class FlipperScript extends Script {
      * Flip Assist puts one there under its own label, so both are tried. The result is returned
      * rather than assigned to a shared local, because the callers capture that local in a lambda.
      */
-    private Widget findSuggestedItemWidget() {
+    Widget findSuggestedItemWidget() {
         Widget widget = findUiWidget("Copilot item:", null, false);
         if (widget == null) {
             widget = findUiWidget(FlipAssistItemLabel, null, false);
@@ -1386,35 +1493,43 @@ public class FlipperScript extends Script {
                 ? SlotActionExecutor.Action.ABORT : SlotActionExecutor.Action.MODIFY;
             SlotActionExecutor.Result result = SlotActionExecutor.execute(config.slotAction(), action, slotId,
                 new SlotActionExecutor.Ui() {
+                    private BooleanSupplier hoverGuard = () -> true;
+                    private boolean variedHover;
                     public boolean slotSwapEnabled() { return isSlotActionSwapEnabled(); }
                     public net.runelite.api.Point actionPoint(int id, SlotActionExecutor.Action a) {
                         return slotActionPoint(id, a);
                     }
-                    public void hover(net.runelite.api.Point point) {
+                    public boolean hover(net.runelite.api.Point point) {
                         // Mouse.move dispatches a single jump. Follow a smooth path on this
                         // script thread; never block the client thread for mouse movement.
+                        if (randomizeMouseSpeed()) {
+                            variedHover = true;
+                            hoverGuard = mouseMovementGuard();
+                            return mouseMotion.move(point, true, hoverGuard);
+                        }
                         if (Microbot.naturalMouse != null && !Thread.currentThread().isInterrupted()) {
                             Microbot.naturalMouse.moveTo(point.getX(), point.getY());
                         }
+                        return true;
                     }
                     public boolean awaitDefaultAction(int id, SlotActionExecutor.Action a, net.runelite.api.Point point) {
-                        return waitForUi(() -> isSlotDefaultAction(id, a, point, key), 1800);
+                        return hoverGuard.getAsBoolean()
+                            && waitForUi(() -> !hoverGuard.getAsBoolean() || isSlotDefaultAction(id, a, point, key), 1800)
+                            && hoverGuard.getAsBoolean();
                     }
                     public boolean clickDefaultAction(int id, SlotActionExecutor.Action a, net.runelite.api.Point point) {
-                        if (!FlipperScript.this.isRunning() || Thread.currentThread().isInterrupted()
+                        if (!hoverGuard.getAsBoolean() || !FlipperScript.this.isRunning() || Thread.currentThread().isInterrupted()
                             || !isSlotDefaultAction(id, a, point, key)) return false;
                         // Reuse the verified point; a rectangle would choose a different point.
-                        Microbot.getMouse().click(point);
-                        return true;
+                        return variedHover ? mouseMotion.click(point, true, hoverGuard) : clickTradingMouse(point);
                     }
                     public boolean invokeAction(int id, SlotActionExecutor.Action a, net.runelite.api.Point point) {
                         if (Thread.currentThread().isInterrupted() || !sameSlotSuggestion(key)
                             || isOfferScreenOpen() || slotActionPoint(id, a) == null) return false;
-                        Microbot.doInvoke(new NewMenuEntry().option(a.option).target("")
+                        return invokeTradingMouse(new NewMenuEntry().option(a.option).target("")
                             .identifier(a.identifier).type(MenuAction.CC_OP).param0(2).param1(id)
                             .itemId(-1).forceLeftClick(false),
                             new Rectangle(point.getX() - 1, point.getY() - 1, 2, 2));
-                        return true;
                     }
                 });
             lastActionTime = System.currentTimeMillis();
@@ -1462,7 +1577,7 @@ public class FlipperScript extends Script {
 			log.info("Found chat widget Copilot item '{}'.", copilotWidget.getId());
 			if (isMouseMode()) {
 				log.info("Selecting Copilot item via mouse click.");
-				Rs2Widget.clickWidget(copilotWidget);
+				if (!clickTradingWidget(copilotWidget)) return true;
 			} else {
 				log.info("Selecting Copilot item via hotkey (ENTER).");
 				Rs2Keyboard.keyPress(KeyEvent.VK_ENTER);
@@ -1474,7 +1589,7 @@ public class FlipperScript extends Script {
 				if (!waitForUi(() -> !isUiWidgetVisible(copilotWidget.getId()), 1500)) {
 					// Fallback to mouse click if ENTER failed
 					if (isUiWidgetVisible(copilotWidget.getId())) {
-						Rs2Widget.clickWidget(copilotWidget);
+						if (!clickTradingWidget(copilotWidget)) return true;
 						waitForUi(() -> !isUiWidgetVisible(copilotWidget.getId()), 1500);
 					}
 				}
@@ -1517,7 +1632,7 @@ public class FlipperScript extends Script {
 			if (isMouseMode()) {
 				if (copilotButtonVisible) {
 					log.info("Clicking Copilot prompt button '{}' via mouse.", copilotButton.getId());
-					Rs2Widget.clickWidget(copilotButton);
+					if (!clickTradingWidget(copilotButton)) return true;
 				} else {
 					log.info("Copilot prompt button not visible, falling back to hotkey [E].");
 					triggerCopilotQuickSet();
@@ -1631,8 +1746,7 @@ public class FlipperScript extends Script {
                     || !finishPermitsTrade()
                     || !bounds.equals(geWarningYesBounds())) return false;
                 // Inspect on ClientThread, but move/click and wait on the script worker.
-                Microbot.getMouse().click(bounds);
-                return true;
+                return clickTradingMouse(bounds);
             }
             public boolean awaitDismissal() {
                 return waitForUi(() -> !isGeWarningOpen(), 1500);
@@ -1712,9 +1826,9 @@ public class FlipperScript extends Script {
 				if (!finishPermitsTrade()) return true;
 
 				if (clickBounds != null && Rs2UiHelper.isRectangleWithinCanvas(clickBounds)) {
-					Microbot.getMouse().click(clickBounds);
+					if (!clickTradingMouse(clickBounds)) return true;
 				} else {
-					Rs2Widget.clickWidget(highlightedWidget);
+					if (!clickTradingWidget(highlightedWidget)) return true;
 				}
 				Rs2Random.wait(100, 200);
 				lastActionTime = currentTime;
